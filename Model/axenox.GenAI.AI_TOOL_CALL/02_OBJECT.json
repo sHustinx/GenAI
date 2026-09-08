@@ -106,16 +106,48 @@
                 "widget_type": "Dialog",
                 "widgets": [
                     {
-                        "attribute_alias": "TOOL_ALIAS",
-                        "widget_type": "Display",
-                        "width": "100%"
+                        "widget_type": "WidgetGroup",
+                        "caption": "Info",
+                        "width": 2,
+                        "widgets": [
+                            {
+                                "attribute_alias": "TOOL_ALIAS",
+                                "widget_type": "Display",
+                                "width": "50%"
+                            },
+                            {
+                                "attribute_alias": "FAILED",
+                                "widget_type": "Display",
+                                "width": "50%"
+                            }
+                        ]
                     },
                     {
-                        "attribute_alias": "RESULT",
-                        "widget_type": "Markdown",
-                        "hide_caption": true,
-                        "width": "100%",
-                        "height": "max"
+                        "widget_type": "WidgetGroup",
+                        "caption": "Tool Call",
+                        "width": 2,
+                        "widgets": [
+                            {
+                                "attribute_alias": "CALL_DISPLAY",
+                                "widget_type": "Markdown",
+                                "hide_caption": true,
+                                "width": "100%"
+                            }
+                        ]
+                    },
+                    {
+                        "widget_type": "WidgetGroup",
+                        "caption": "Result",
+                        "width": 2,
+                        "widgets": [
+                            {
+                                "attribute_alias": "RESULT",
+                                "widget_type": "Markdown",
+                                "hide_caption": true,
+                                "width": "100%",
+                                "height": "max"
+                            }
+                        ]
                     }
                 ]
             },
