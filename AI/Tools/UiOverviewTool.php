@@ -4,6 +4,7 @@ namespace axenox\GenAI\AI\Tools;
 use axenox\GenAI\Common\AbstractAiTool;
 use axenox\GenAI\Common\AiToolResultString;
 use axenox\GenAI\Exceptions\AiToolRuntimeError;
+use axenox\GenAI\Exceptions\AiToolRuntimeWarning;
 use axenox\GenAI\Interfaces\AiAgentInterface;
 use axenox\GenAI\Interfaces\AiPromptInterface;
 use axenox\GenAI\Interfaces\AiToolResultInterface;
@@ -41,12 +42,19 @@ class UiOverviewTool extends AbstractAiTool
     public const ARG_APP = 'app';
     public const ARG_DEPTH = 'depth';
 
+    private ?AiPromptInterface $activePrompt = null;
+    private array $warnings = [];
+    private array $warningKeys = [];
+
     /**
      * {@inheritDoc}
      * @see \axenox\GenAI\Interfaces\AiToolInterface::invoke()
      */
     public function invoke(AiAgentInterface $agent, AiPromptInterface $prompt, array $arguments): AiToolResultInterface
     {
+        $this->activePrompt = $prompt;
+        $this->warnings = [];
+        $this->warningKeys = [];
         $appAlias = trim((string) ($arguments[0] ?? ''));
         if ($appAlias === '') {
             throw new AiToolRuntimeError($this, $prompt, 'Missing required argument: app');
@@ -58,8 +66,13 @@ class UiOverviewTool extends AbstractAiTool
 
         // Build the complete main menu the same way the NavMenu widget does when showing all pages -
         // starting from the default server root page and expanding all levels.
-        $tree = UiPageTreeFactory::createFromRoot($this->getWorkbench());
-        $rootNodes = $tree->getRootNodes();
+        try {
+            $tree = UiPageTreeFactory::createFromRoot($this->getWorkbench());
+            $rootNodes = $tree->getRootNodes();
+        } catch (\Throwable $e) {
+            $this->addWarning('Could not load the main menu', $e);
+            $rootNodes = [];
+        }
 
         $md = '# UI overview of app ' . $appAliasNs . "\n\n";
         $md .= 'The **Main menu** section below lists all pages available in the menu with a link to each page. '
@@ -88,7 +101,7 @@ class UiOverviewTool extends AbstractAiTool
             }
         }
 
-        return new AiToolResultString($this, $arguments, $md, $this->getReturnDataType());
+        return new AiToolResultString($this, $arguments, $md, $this->getReturnDataType(), [], $this->warnings);
     }
 
     /**
@@ -103,15 +116,23 @@ class UiOverviewTool extends AbstractAiTool
         $md = '';
         $indent = str_repeat('  ', $level);
         foreach ($nodes as $node) {
-            $url = $node->getPageAlias() . '.html';
-            $line = $indent . '- [' . $node->getName() . '](' . $url . ')';
-            $descr = $node->getDescription() ?? $node->getIntro();
-            if ($descr !== null && $descr !== '') {
-                $line .= ' - ' . $this->oneLine($descr);
+            try {
+                $url = $node->getPageAlias() . '.html';
+                $line = $indent . '- [' . $node->getName() . '](' . $url . ')';
+                $descr = $node->getDescription() ?? $node->getIntro();
+                if ($descr !== null && $descr !== '') {
+                    $line .= ' - ' . $this->oneLine($descr);
+                }
+                $md .= $line . "\n";
+            } catch (\Throwable $e) {
+                $this->addWarning('Could not render a main-menu entry; the entry was skipped', $e);
             }
-            $md .= $line . "\n";
-            if ($node->hasChildNodes()) {
-                $md .= $this->renderMenu($node->getChildNodes(), $level + 1);
+            try {
+                if ($node->hasChildNodes()) {
+                    $md .= $this->renderMenu($node->getChildNodes(), $level + 1);
+                }
+            } catch (\Throwable $e) {
+                $this->addWarning('Could not read child entries from a main-menu entry', $e);
             }
         }
         return $md;
@@ -133,10 +154,14 @@ class UiOverviewTool extends AbstractAiTool
                     $result[] = $node;
                 }
             } catch (\Throwable $e) {
-                $this->getWorkbench()->getLogger()->logException($e);
+                $this->addWarning('Could not inspect a menu entry while collecting app pages', $e);
             }
-            if ($node->hasChildNodes()) {
-                $this->collectAppNodes($node->getChildNodes(), $appAliasNs, $result);
+            try {
+                if ($node->hasChildNodes()) {
+                    $this->collectAppNodes($node->getChildNodes(), $appAliasNs, $result);
+                }
+            } catch (\Throwable $e) {
+                $this->addWarning('Could not read child entries while collecting app pages', $e);
             }
         }
     }
@@ -154,15 +179,20 @@ class UiOverviewTool extends AbstractAiTool
             $page = $node->getPage();
             $rootWidget = $page->getWidgetRoot();
         } catch (\Throwable $e) {
-            $this->getWorkbench()->getLogger()->logException($e);
-            return '### Page "' . $node->getName() . "\"\n\n_Could not load page: " . $e->getMessage() . "_\n\n";
+            $this->addWarning('Could not load a page; the page details were skipped', $e);
+            return "### Unavailable page\n\n_Could not load this page; rendering continued._\n\n";
         }
 
-        $title = 'Page "' . $node->getName() . '"';
-        $context = 'URL: `' . $node->getPageAlias() . '.html`';
-        $descr = $node->getDescription() ?? $node->getIntro();
-        $visited = [];
-        return $this->describeScreen($rootWidget, $title, $context, $descr, 3, $depth, $visited);
+        try {
+            $title = 'Page "' . $node->getName() . '"';
+            $context = 'URL: `' . $node->getPageAlias() . '.html`';
+            $descr = $node->getDescription() ?? $node->getIntro();
+            $visited = [];
+            return $this->describeScreen($rootWidget, $title, $context, $descr, 3, $depth, $visited);
+        } catch (\Throwable $e) {
+            $this->addWarning('Could not render a page completely; the remaining page details were skipped', $e);
+            return "### Partially unavailable page\n\n_Could not render this page completely; rendering continued._\n\n";
+        }
     }
 
     /**
@@ -191,7 +221,12 @@ class UiOverviewTool extends AbstractAiTool
         }
 
         // Objects shown on this screen
-        $objects = $this->collectObjects($screen);
+        try {
+            $objects = $this->collectObjects($screen);
+        } catch (\Throwable $e) {
+            $this->addWarning('Could not inspect all objects on a screen', $e);
+            $objects = [];
+        }
         if (! empty($objects)) {
             $md .= "Objects shown:\n";
             foreach ($objects as $objLine) {
@@ -201,34 +236,39 @@ class UiOverviewTool extends AbstractAiTool
         }
 
         // Buttons available to the user on this screen
-        $buttons = $this->collectButtons($screen);
+        try {
+            $buttons = $this->collectButtons($screen);
+        } catch (\Throwable $e) {
+            $this->addWarning('Could not inspect all buttons on a screen', $e);
+            $buttons = [];
+        }
         $dialogs = [];
         if (! empty($buttons)) {
             $md .= "Buttons by input widget:\n\n";
             foreach ($this->groupButtonsByInputWidget($buttons) as $group) {
                 $md .= '**' . $group['label'] . "**\n";
                 foreach ($group['buttons'] as $button) {
-                    $action = $button->hasAction() ? $button->getAction() : null;
-                    $caption = $button->getCaption();
-                    if ($caption === null || $caption === '') {
-                        $caption = $button->getWidgetType();
-                    }
-                    $line = '- **' . $this->oneLine($caption) . '**';
-                    if ($action !== null) {
-                        $line .= ' - action `' . $action->getAliasWithNamespace() . '`';
-                        if ($action instanceof iShowDialog) {
-                            $line .= ', opens a dialog';
-                            try {
+                    try {
+                        $action = $button->hasAction() ? $button->getAction() : null;
+                        $caption = $button->getCaption();
+                        if ($caption === null || $caption === '') {
+                            $caption = $button->getWidgetType();
+                        }
+                        $line = '- **' . $this->oneLine($caption) . '**';
+                        if ($action !== null) {
+                            $line .= ' - action `' . $action->getAliasWithNamespace() . '`';
+                            if ($action instanceof iShowDialog) {
+                                $line .= ', opens a dialog';
                                 $dialog = $action->getDialogWidget();
                                 if ($dialog !== null) {
                                     $dialogs[] = [$button, $dialog];
                                 }
-                            } catch (\Throwable $e) {
-                                $this->getWorkbench()->getLogger()->logException($e);
                             }
                         }
+                        $md .= $line . "\n";
+                    } catch (\Throwable $e) {
+                        $this->addWarning('Could not inspect a button or its action; the button was skipped', $e);
                     }
-                    $md .= $line . "\n";
                 }
                 $md .= "\n";
             }
@@ -237,19 +277,23 @@ class UiOverviewTool extends AbstractAiTool
         // Recurse into dialogs opened from the buttons of this screen
         if ($depth > 0) {
             foreach ($dialogs as [$button, $dialog]) {
-                $dialogId = $dialog->getId();
-                if (in_array($dialogId, $visited, true)) {
-                    continue;
+                try {
+                    $dialogId = $dialog->getId();
+                    if (in_array($dialogId, $visited, true)) {
+                        continue;
+                    }
+                    $visited[] = $dialogId;
+                    $dialogCaption = $dialog->getCaption();
+                    if ($dialogCaption === null || $dialogCaption === '') {
+                        $dialogCaption = $button->getCaption() ?? $dialog->getWidgetType();
+                    }
+                    $dialogTitle = 'Dialog "' . $this->oneLine($dialogCaption) . '"';
+                    $btnCaption = $button->getCaption() ?? '';
+                    $dialogContext = 'Opened from ' . trim($title) . ' via button "' . $this->oneLine($btnCaption) . '"';
+                    $md .= $this->describeScreen($dialog, $dialogTitle, $dialogContext, null, $headingLevel + 1, $depth - 1, $visited);
+                } catch (\Throwable $e) {
+                    $this->addWarning('Could not render a dialog; the dialog was skipped', $e);
                 }
-                $visited[] = $dialogId;
-                $dialogCaption = $dialog->getCaption();
-                if ($dialogCaption === null || $dialogCaption === '') {
-                    $dialogCaption = $button->getCaption() ?? $dialog->getWidgetType();
-                }
-                $dialogTitle = 'Dialog "' . $this->oneLine($dialogCaption) . '"';
-                $btnCaption = $button->getCaption() ?? '';
-                $dialogContext = 'Opened from ' . trim($title) . ' via button "' . $this->oneLine($btnCaption) . '"';
-                $md .= $this->describeScreen($dialog, $dialogTitle, $dialogContext, null, $headingLevel + 1, $depth - 1, $visited);
             }
         }
 
@@ -272,8 +316,12 @@ class UiOverviewTool extends AbstractAiTool
     {
         $buttons = [];
         foreach ($screen->getChildrenRecursive() as $child) {
-            if ($child instanceof Button && ! $this->isInsideConfigurator($child) && ! $this->isAutoIncludedAction($child)) {
-                $buttons[] = $child;
+            try {
+                if ($child instanceof Button && ! $this->isInsideConfigurator($child) && ! $this->isAutoIncludedAction($child)) {
+                    $buttons[] = $child;
+                }
+            } catch (\Throwable $e) {
+                $this->addWarning('Could not inspect a widget while collecting buttons; the widget was skipped', $e);
             }
         }
         return $buttons;
@@ -416,6 +464,29 @@ class UiOverviewTool extends AbstractAiTool
             $collect($child);
         }
         return $names;
+    }
+
+    /**
+     * Records and logs a recoverable rendering problem.
+     *
+     * @param string $message
+     * @param \Throwable $previous
+     * @return void
+     */
+    protected function addWarning(string $message, \Throwable $previous): void
+    {
+        $warningKey = $message . "\0" . get_class($previous) . "\0" . $previous->getMessage();
+        if (isset($this->warningKeys[$warningKey])) {
+            return;
+        }
+        $this->warningKeys[$warningKey] = true;
+        if ($this->activePrompt === null) {
+            $this->getWorkbench()->getLogger()->logException($previous);
+            return;
+        }
+        $warning = new AiToolRuntimeWarning($this, $this->activePrompt, $message, null, $previous);
+        $this->getWorkbench()->getLogger()->logException($warning);
+        $this->warnings[] = $warning;
     }
 
     /**
