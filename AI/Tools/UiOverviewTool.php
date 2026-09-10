@@ -8,8 +8,6 @@ use axenox\GenAI\Interfaces\AiAgentInterface;
 use axenox\GenAI\Interfaces\AiPromptInterface;
 use axenox\GenAI\Interfaces\AiToolResultInterface;
 use exface\Core\CommonLogic\Actions\ServiceParameter;
-use exface\Core\CommonLogic\UxonObject;
-use exface\Core\DataTypes\BooleanDataType;
 use exface\Core\DataTypes\MarkdownDataType;
 use exface\Core\Factories\DataTypeFactory;
 use exface\Core\Factories\UiPageTreeFactory;
@@ -17,8 +15,12 @@ use exface\Core\Interfaces\Actions\iShowDialog;
 use exface\Core\Interfaces\DataTypes\DataTypeInterface;
 use exface\Core\Interfaces\Model\UiPageTreeNodeInterface;
 use exface\Core\Interfaces\WidgetInterface;
+use exface\Core\Interfaces\Widgets\iHaveContextualHelp;
 use exface\Core\Interfaces\WorkbenchInterface;
 use exface\Core\Widgets\Button;
+use exface\Core\Widgets\ButtonGroup;
+use exface\Core\Widgets\DataToolbar;
+use exface\Core\Widgets\WidgetConfigurator;
 
 /**
  * Get an overview of the main menu of an app with all its submenus, available actions, inner dialogs, etc.
@@ -38,7 +40,6 @@ class UiOverviewTool extends AbstractAiTool
 {
     public const ARG_APP = 'app';
     public const ARG_DEPTH = 'depth';
-    public const ARG_EXCLUDE_DEFAULT_ACTIONS = 'exclude_default_actions';
 
     /**
      * {@inheritDoc}
@@ -51,7 +52,6 @@ class UiOverviewTool extends AbstractAiTool
             throw new AiToolRuntimeError($this, $prompt, 'Missing required argument: app');
         }
         $depth = (int) ($arguments[1] ?? 1);
-        $excludeDefaultActions = BooleanDataType::cast($arguments[2] ?? false) ?? false;
 
         $appOfInterest = $this->getWorkbench()->getApp($appAlias);
         $appAliasNs = $appOfInterest->getAliasWithNamespace();
@@ -66,9 +66,6 @@ class UiOverviewTool extends AbstractAiTool
             . 'Use these URLs with the UI widget info tool to get more details about any page. '
             . 'The **Screens** section describes the pages of app `' . $appAliasNs . '` and the dialogs reachable '
             . "from them in more detail.\n\n";
-        if ($excludeDefaultActions) {
-            $md .= "Unconfigured standard actions are omitted from this overview.\n\n";
-        }
 
         // Main menu
         $md .= "## Main menu\n\n";
@@ -87,7 +84,7 @@ class UiOverviewTool extends AbstractAiTool
             $md .= "_No menu pages found for this app._\n";
         } else {
             foreach ($appNodes as $node) {
-                $md .= $this->describePageNode($node, $depth, $excludeDefaultActions);
+                $md .= $this->describePageNode($node, $depth);
             }
         }
 
@@ -149,10 +146,9 @@ class UiOverviewTool extends AbstractAiTool
      * 
      * @param UiPageTreeNodeInterface $node
      * @param int $depth
-    * @param bool $excludeDefaultActions
      * @return string
      */
-    protected function describePageNode(UiPageTreeNodeInterface $node, int $depth, bool $excludeDefaultActions): string
+    protected function describePageNode(UiPageTreeNodeInterface $node, int $depth): string
     {
         try {
             $page = $node->getPage();
@@ -166,7 +162,7 @@ class UiOverviewTool extends AbstractAiTool
         $context = 'URL: `' . $node->getPageAlias() . '.html`';
         $descr = $node->getDescription() ?? $node->getIntro();
         $visited = [];
-        return $this->describeScreen($rootWidget, $title, $context, $descr, 3, $depth, $excludeDefaultActions, $visited);
+        return $this->describeScreen($rootWidget, $title, $context, $descr, 3, $depth, $visited);
     }
 
     /**
@@ -181,11 +177,10 @@ class UiOverviewTool extends AbstractAiTool
      * @param string|null $description
      * @param int $headingLevel
      * @param int $depth
-    * @param bool $excludeDefaultActions
      * @param string[] $visited
      * @return string
      */
-    protected function describeScreen(WidgetInterface $screen, string $title, ?string $context, ?string $description, int $headingLevel, int $depth, bool $excludeDefaultActions, array &$visited): string
+    protected function describeScreen(WidgetInterface $screen, string $title, ?string $context, ?string $description, int $headingLevel, int $depth, array &$visited): string
     {
         $md = str_repeat('#', $headingLevel) . ' ' . $title . "\n\n";
         if ($context !== null && $context !== '') {
@@ -207,11 +202,6 @@ class UiOverviewTool extends AbstractAiTool
 
         // Buttons available to the user on this screen
         $buttons = $this->collectButtons($screen);
-        if ($excludeDefaultActions) {
-            $buttons = array_filter($buttons, function (Button $button) {
-                return ! $button->hasAction() || ! $this->isUnconfiguredStandardAction($button);
-            });
-        }
         $dialogs = [];
         if (! empty($buttons)) {
             $md .= "Buttons by input widget:\n\n";
@@ -259,7 +249,7 @@ class UiOverviewTool extends AbstractAiTool
                 $dialogTitle = 'Dialog "' . $this->oneLine($dialogCaption) . '"';
                 $btnCaption = $button->getCaption() ?? '';
                 $dialogContext = 'Opened from ' . trim($title) . ' via button "' . $this->oneLine($btnCaption) . '"';
-                $md .= $this->describeScreen($dialog, $dialogTitle, $dialogContext, null, $headingLevel + 1, $depth - 1, $excludeDefaultActions, $visited);
+                $md .= $this->describeScreen($dialog, $dialogTitle, $dialogContext, null, $headingLevel + 1, $depth - 1, $visited);
             }
         }
 
@@ -271,6 +261,9 @@ class UiOverviewTool extends AbstractAiTool
      * 
      * Only widgets within the same id space are traversed, so buttons of dialogs opened from this
      * screen are not included here - they are documented separately when the dialog is described.
+     * Buttons inside configurators are omitted because this generated UI is the same for every
+    * configured widget and does not describe app-specific behavior. Automatically included global,
+    * search, reset and contextual-help actions are omitted for the same reason.
      * 
      * @param WidgetInterface $screen
      * @return Button[]
@@ -279,11 +272,63 @@ class UiOverviewTool extends AbstractAiTool
     {
         $buttons = [];
         foreach ($screen->getChildrenRecursive() as $child) {
-            if ($child instanceof Button) {
+            if ($child instanceof Button && ! $this->isInsideConfigurator($child) && ! $this->isAutoIncludedAction($child)) {
                 $buttons[] = $child;
             }
         }
         return $buttons;
+    }
+
+    /**
+     * Returns TRUE if the widget belongs to a generated configurator subtree.
+     *
+     * @param WidgetInterface $widget
+     * @return bool
+     */
+    protected function isInsideConfigurator(WidgetInterface $widget): bool
+    {
+        while ($widget->hasParent()) {
+            $widget = $widget->getParent();
+            if ($widget instanceof WidgetConfigurator) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns TRUE if the button was automatically included by a standard widget.
+     *
+     * This excludes the following repetitive framework-generated controls:
+     *
+     * - global actions in a DataToolbar's dedicated global-actions button group,
+     * - search and reset actions in a DataToolbar's dedicated search-actions button group,
+     * - the contextual-help button generated by a widget implementing iHaveContextualHelp.
+     *
+     * The check compares the actual generated button and button-group instances. Manually configured
+     * buttons are therefore retained even if they use the same action aliases.
+     *
+     * @param Button $button
+     * @return bool
+     */
+    protected function isAutoIncludedAction(Button $button): bool
+    {
+        $widget = $button;
+        while ($widget->hasParent()) {
+            $widget = $widget->getParent();
+            if ($widget instanceof iHaveContextualHelp && $widget->getHelpButton() === $button) {
+                return true;
+            }
+            if ($widget instanceof ButtonGroup && $widget->hasParent()) {
+                $toolbar = $widget->getParent();
+                if ($toolbar instanceof DataToolbar
+                    && ($toolbar->getButtonGroupForGlobalActions() === $widget
+                        || $toolbar->getButtonGroupForSearchActions() === $widget)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -342,40 +387,6 @@ class UiOverviewTool extends AbstractAiTool
             // Some structural widgets do not have a meta object.
         }
         return $label;
-    }
-
-    /**
-     * Returns TRUE for standard core actions without additional action configuration.
-     *
-     * @param Button $button
-     * @return bool
-     */
-    protected function isUnconfiguredStandardAction(Button $button): bool
-    {
-        $action = $button->getAction();
-        if ($action === null || stripos($action->getAliasWithNamespace(), 'exface.Core.') !== 0) {
-            return false;
-        }
-
-        $uxon = $button->exportUxonObjectOriginal();
-        if ($uxon === null) {
-            return true;
-        }
-        foreach ($uxon->getPropertyNames() as $propertyName) {
-            if (substr($propertyName, 0, 7) === 'action_' && $propertyName !== 'action_alias') {
-                return false;
-            }
-        }
-
-        $actionUxon = $uxon->getProperty('action');
-        if ($actionUxon instanceof UxonObject) {
-            foreach ($actionUxon->getPropertyNames() as $propertyName) {
-                if ($propertyName !== 'alias') {
-                    return false;
-                }
-            }
-        }
-        return true;
     }
 
     /**
@@ -439,12 +450,6 @@ class UiOverviewTool extends AbstractAiTool
                 ->setName(self::ARG_DEPTH)
                 ->setDescription('How deep to follow dialogs opened by buttons inside the pages of the app of interest. Higher values can produce very extensive output and incur significant processing and AI costs.')
                 ->setDefaultValue(1)
-                ->setRequired(false),
-            (new ServiceParameter($self))
-                ->setDataType(new UxonObject(['alias' => 'exface.Core.Boolean']))
-                ->setName(self::ARG_EXCLUDE_DEFAULT_ACTIONS)
-                ->setDescription('Whether to omit standard exface.Core actions that have no configuration beyond their alias. Custom app actions and configured standard actions remain visible. Enable this for a shorter overview focused on app-specific behavior.')
-                ->setDefaultValue(false)
                 ->setRequired(false)
         ];
     }
