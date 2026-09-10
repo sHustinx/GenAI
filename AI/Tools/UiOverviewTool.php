@@ -214,31 +214,34 @@ class UiOverviewTool extends AbstractAiTool
         }
         $dialogs = [];
         if (! empty($buttons)) {
-            $md .= "Buttons:\n";
-            foreach ($buttons as $button) {
-                $action = $button->hasAction() ? $button->getAction() : null;
-                $caption = $button->getCaption();
-                if ($caption === null || $caption === '') {
-                    $caption = $button->getWidgetType();
-                }
-                $line = '- **' . $this->oneLine($caption) . '**';
-                if ($action !== null) {
-                    $line .= ' - action `' . $action->getAliasWithNamespace() . '`';
-                    if ($action instanceof iShowDialog) {
-                        $line .= ', opens a dialog';
-                        try {
-                            $dialog = $action->getDialogWidget();
-                            if ($dialog !== null) {
-                                $dialogs[] = [$button, $dialog];
+            $md .= "Buttons by input widget:\n\n";
+            foreach ($this->groupButtonsByInputWidget($buttons) as $group) {
+                $md .= '**' . $group['label'] . "**\n";
+                foreach ($group['buttons'] as $button) {
+                    $action = $button->hasAction() ? $button->getAction() : null;
+                    $caption = $button->getCaption();
+                    if ($caption === null || $caption === '') {
+                        $caption = $button->getWidgetType();
+                    }
+                    $line = '- **' . $this->oneLine($caption) . '**';
+                    if ($action !== null) {
+                        $line .= ' - action `' . $action->getAliasWithNamespace() . '`';
+                        if ($action instanceof iShowDialog) {
+                            $line .= ', opens a dialog';
+                            try {
+                                $dialog = $action->getDialogWidget();
+                                if ($dialog !== null) {
+                                    $dialogs[] = [$button, $dialog];
+                                }
+                            } catch (\Throwable $e) {
+                                $this->getWorkbench()->getLogger()->logException($e);
                             }
-                        } catch (\Throwable $e) {
-                            $this->getWorkbench()->getLogger()->logException($e);
                         }
                     }
+                    $md .= $line . "\n";
                 }
-                $md .= $line . "\n";
+                $md .= "\n";
             }
-            $md .= "\n";
         }
 
         // Recurse into dialogs opened from the buttons of this screen
@@ -281,6 +284,64 @@ class UiOverviewTool extends AbstractAiTool
             }
         }
         return $buttons;
+    }
+
+    /**
+     * Groups buttons by their effective input widget and sorts the groups by label.
+     *
+     * @param Button[] $buttons
+     * @return array[]
+     */
+    protected function groupButtonsByInputWidget(array $buttons): array
+    {
+        $groups = [];
+        foreach ($buttons as $button) {
+            try {
+                $inputWidget = $button->getInputWidget();
+                $key = spl_object_hash($inputWidget);
+                $label = $this->describeInputWidget($inputWidget);
+            } catch (\Throwable $e) {
+                $this->getWorkbench()->getLogger()->logException($e);
+                $key = 'unknown';
+                $label = 'Unknown input widget';
+            }
+            if (! isset($groups[$key])) {
+                $groups[$key] = [
+                    'label' => $label,
+                    'buttons' => []
+                ];
+            }
+            $groups[$key]['buttons'][] = $button;
+        }
+        uasort($groups, function (array $left, array $right) {
+            return strcasecmp($left['label'], $right['label']);
+        });
+        return array_values($groups);
+    }
+
+    /**
+     * Builds a concise label identifying an action input widget.
+     *
+     * @param WidgetInterface $widget
+     * @return string
+     */
+    protected function describeInputWidget(WidgetInterface $widget): string
+    {
+        $label = '`' . $widget->getWidgetType() . '`';
+        $caption = $widget->getCaption();
+        if ($caption !== null && $caption !== '') {
+            $label .= ' "' . $this->oneLine($caption) . '"';
+        }
+        $id = $widget->getId();
+        if ($id !== null && $id !== '') {
+            $label .= ' (`' . $id . '`)';
+        }
+        try {
+            $label .= ' - object `' . $widget->getMetaObject()->getAliasWithNamespace() . '`';
+        } catch (\Throwable $e) {
+            // Some structural widgets do not have a meta object.
+        }
+        return $label;
     }
 
     /**

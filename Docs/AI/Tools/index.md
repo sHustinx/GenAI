@@ -704,7 +704,7 @@ replacement text
 
 **How to use.** The model supplies the app alias and optionally a recursion depth. Set `exclude_default_actions` to `true` for a shorter overview focused on app-specific actions. The menu is built the same way as the `NavMenu` widget, starting from the default server root page.
 
-**Result and limits.** Each screen chapter lists the meta objects shown on the screen and all buttons available to the user. Dialogs are documented recursively until the depth budget is exhausted; only menu-visible pages appear in the overview.
+**Result and limits.** Each screen chapter lists the meta objects shown on the screen and groups available buttons by their effective input widget. Input-widget groups are sorted by their widget label. Dialogs are documented recursively until the depth budget is exhausted; only menu-visible pages appear in the overview.
 
 ## `UiWidgetInfoTool`
 

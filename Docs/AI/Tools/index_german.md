@@ -704,7 +704,7 @@ replacement text
 
 **Verwendung.** Das Modell übergibt den App-Alias und optional eine Rekursionstiefe. Setzen Sie `exclude_default_actions` für eine kürzere, auf App-spezifische Aktionen fokussierte Übersicht auf `true`. Das Menü wird auf dieselbe Weise wie beim `NavMenu`-Widget aufgebaut, beginnend bei der Standard-Startseite des Servers.
 
-**Ergebnis und Grenzen.** Jedes Bildschirm-Kapitel listet die auf dem Bildschirm gezeigten Metaobjekte sowie alle für den Benutzer verfügbaren Schaltflächen auf. Dialoge werden rekursiv dokumentiert, bis das Tiefenbudget erschöpft ist; nur im Menü sichtbare Seiten erscheinen in der Übersicht.
+**Ergebnis und Grenzen.** Jedes Bildschirm-Kapitel listet die auf dem Bildschirm gezeigten Metaobjekte auf und gruppiert verfügbare Schaltflächen nach ihrem effektiven Eingabe-Widget. Die Eingabe-Widget-Gruppen werden nach ihrer Widget-Bezeichnung sortiert. Dialoge werden rekursiv dokumentiert, bis das Tiefenbudget erschöpft ist; nur im Menü sichtbare Seiten erscheinen in der Übersicht.
 
 ## `UiWidgetInfoTool`
 
