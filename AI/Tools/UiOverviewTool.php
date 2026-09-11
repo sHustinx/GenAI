@@ -101,7 +101,9 @@ class UiOverviewTool extends AbstractAiTool
             }
         }
 
-        return new AiToolResultString($this, $arguments, $md, $this->getReturnDataType(), [], $this->warnings);
+        $result = new AiToolResultString($this, $arguments, $md, $this->getReturnDataType(), [], $this->warnings);
+        $this->activePrompt = null;
+        return $result;
     }
 
     /**
@@ -114,9 +116,22 @@ class UiOverviewTool extends AbstractAiTool
     protected function renderMenu(array $nodes, int $level): string
     {
         $md = '';
-        $indent = str_repeat('  ', $level);
-        foreach ($nodes as $node) {
+        $pending = [];
+        // Reverse before pushing so the explicit LIFO stack preserves the menu's original order.
+        foreach (array_reverse($nodes) as $node) {
+            $pending[] = [$node, $level];
+        }
+        $seen = [];
+        while (($item = array_pop($pending)) !== null) {
+            [$node, $nodeLevel] = $item;
+            $nodeKey = spl_object_hash($node);
+            // Malformed menu data must not create an endless cycle.
+            if (isset($seen[$nodeKey])) {
+                continue;
+            }
+            $seen[$nodeKey] = true;
             try {
+                $indent = str_repeat('  ', $nodeLevel);
                 $url = $node->getPageAlias() . '.html';
                 $line = $indent . '- [' . $node->getName() . '](' . $url . ')';
                 $descr = $node->getDescription() ?? $node->getIntro();
@@ -129,7 +144,9 @@ class UiOverviewTool extends AbstractAiTool
             }
             try {
                 if ($node->hasChildNodes()) {
-                    $md .= $this->renderMenu($node->getChildNodes(), $level + 1);
+                    foreach (array_reverse($node->getChildNodes()) as $childNode) {
+                        $pending[] = [$childNode, $nodeLevel + 1];
+                    }
                 }
             } catch (\Throwable $e) {
                 $this->addWarning('Could not read child entries from a main-menu entry', $e);
@@ -139,7 +156,7 @@ class UiOverviewTool extends AbstractAiTool
     }
 
     /**
-     * Recursively collects all menu nodes that belong to the given app.
+    * Collects all menu nodes that belong to the given app without recursive calls.
      * 
      * @param UiPageTreeNodeInterface[] $nodes
      * @param string $appAliasNs
@@ -148,7 +165,15 @@ class UiOverviewTool extends AbstractAiTool
      */
     protected function collectAppNodes(array $nodes, string $appAliasNs, array &$result): void
     {
-        foreach ($nodes as $node) {
+        // Use an explicit stack to avoid growing the PHP call stack for deeply nested menus.
+        $pending = array_reverse($nodes);
+        $seen = [];
+        while (($node = array_pop($pending)) !== null) {
+            $nodeKey = spl_object_hash($node);
+            if (isset($seen[$nodeKey])) {
+                continue;
+            }
+            $seen[$nodeKey] = true;
             try {
                 if ($node->hasApp() && strcasecmp($node->getApp()->getAliasWithNamespace(), $appAliasNs) === 0) {
                     $result[] = $node;
@@ -158,7 +183,9 @@ class UiOverviewTool extends AbstractAiTool
             }
             try {
                 if ($node->hasChildNodes()) {
-                    $this->collectAppNodes($node->getChildNodes(), $appAliasNs, $result);
+                    foreach (array_reverse($node->getChildNodes()) as $childNode) {
+                        $pending[] = $childNode;
+                    }
                 }
             } catch (\Throwable $e) {
                 $this->addWarning('Could not read child entries while collecting app pages', $e);
@@ -224,7 +251,7 @@ class UiOverviewTool extends AbstractAiTool
         try {
             $objects = $this->collectObjects($screen);
         } catch (\Throwable $e) {
-            $this->addWarning('Could not inspect all objects on a screen', $e);
+            $this->getWorkbench()->getLogger()->logException($e);
             $objects = [];
         }
         if (! empty($objects)) {
@@ -239,7 +266,7 @@ class UiOverviewTool extends AbstractAiTool
         try {
             $buttons = $this->collectButtons($screen);
         } catch (\Throwable $e) {
-            $this->addWarning('Could not inspect all buttons on a screen', $e);
+            $this->getWorkbench()->getLogger()->logException($e);
             $buttons = [];
         }
         $dialogs = [];
@@ -259,9 +286,12 @@ class UiOverviewTool extends AbstractAiTool
                             $line .= ' - action `' . $action->getAliasWithNamespace() . '`';
                             if ($action instanceof iShowDialog) {
                                 $line .= ', opens a dialog';
-                                $dialog = $action->getDialogWidget();
-                                if ($dialog !== null) {
-                                    $dialogs[] = [$button, $dialog];
+                                // Resolving the dialog instantiates its widget tree, so do it only when it will be rendered.
+                                if ($depth > 0) {
+                                    $dialog = $action->getDialogWidget();
+                                    if ($dialog !== null) {
+                                        $dialogs[] = [$button, $dialog];
+                                    }
                                 }
                             }
                         }
@@ -306,8 +336,8 @@ class UiOverviewTool extends AbstractAiTool
      * Only widgets within the same id space are traversed, so buttons of dialogs opened from this
      * screen are not included here - they are documented separately when the dialog is described.
      * Buttons inside configurators are omitted because this generated UI is the same for every
-    * configured widget and does not describe app-specific behavior. Automatically included global,
-    * search, reset and contextual-help actions are omitted for the same reason.
+     * configured widget and does not describe app-specific behavior. Automatically included global,
+     * search, reset and contextual-help actions are omitted for the same reason.
      * 
      * @param WidgetInterface $screen
      * @return Button[]
@@ -315,7 +345,7 @@ class UiOverviewTool extends AbstractAiTool
     protected function collectButtons(WidgetInterface $screen): array
     {
         $buttons = [];
-        foreach ($screen->getChildrenRecursive() as $child) {
+        foreach ($this->getScreenWidgets($screen) as $child) {
             try {
                 if ($child instanceof Button && ! $this->isInsideConfigurator($child) && ! $this->isAutoIncludedAction($child)) {
                     $buttons[] = $child;
@@ -325,6 +355,49 @@ class UiOverviewTool extends AbstractAiTool
             }
         }
         return $buttons;
+    }
+
+    /**
+     * Iterates over a screen without recursive calls or descending into action-owned button children. Prevent infinite recursion by keeping track of already seen widgets.
+     * Otherwise, when using the normal recursive approach in larger apps, even depth 0 can exceed the stack size and cause issues.
+     *
+     * @param WidgetInterface $screen
+     * @return \Generator|WidgetInterface[]
+     */
+    protected function getScreenWidgets(WidgetInterface $screen): \Generator
+    {
+        $pending = [];
+        try {
+            foreach ($screen->getChildren() as $child) {
+                $pending[] = $child;
+            }
+        } catch (\Throwable $e) {
+            // A broken root subtree must not prevent the remaining overview from being rendered.
+            $this->getWorkbench()->getLogger()->logException($e);
+        }
+        $seen = [];
+        for ($position = 0; isset($pending[$position]); $position++) {
+            $widget = $pending[$position];
+            $key = spl_object_hash($widget);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            yield $widget;
+
+            // Button children are action-owned widgets such as dialogs; those are handled by the depth-controlled path.
+            if ($widget instanceof Button) {
+                continue;
+            }
+            try {
+                foreach ($widget->getChildren() as $child) {
+                    $pending[] = $child;
+                }
+            } catch (\Throwable $e) {
+                // Skip only this broken subtree and continue with widgets already queued from its siblings.
+                $this->getWorkbench()->getLogger()->logException($e);
+            }
+        }
     }
 
     /**
@@ -460,7 +533,7 @@ class UiOverviewTool extends AbstractAiTool
             }
         };
         $collect($screen);
-        foreach ($screen->getChildrenRecursive() as $child) {
+        foreach ($this->getScreenWidgets($screen) as $child) {
             $collect($child);
         }
         return $names;
